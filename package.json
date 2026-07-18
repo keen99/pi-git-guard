@@ -1,0 +1,26 @@
+{
+  "name": "pi-git-guard",
+  "version": "0.1.0",
+  "description": "pi extension that gates destructive git CLI commands (revert, reset --hard, force push, etc) with a confirmation prompt or hard block",
+  "keywords": ["pi-package", "pi-extension", "git", "safety", "guard"],
+  "license": "MIT",
+  "author": "David Raistrick",
+  "homepage": "https://github.com/keen99/pi-git-guard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/keen99/pi-git-guard.git"
+  },
+  "type": "module",
+  "main": "./index.ts",
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "echo 'nothing to check'"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
