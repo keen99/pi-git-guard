@@ -44,44 +44,72 @@ const BYPASS_KEY = "git-guard-bypass";
 const MODE_KEY = "git-guard-mode";
 
 // Commands we refuse/prompt on. Each entry: the git subcommand name and a
-// predicate over the tokens that follow it.
-const DESTRUCTIVE_RULES: Array<{ subcommand: string; match: (tokens: string[]) => boolean; label: string }> = [
-	{ subcommand: "revert", match: () => true, label: "git revert" },
+// predicate over the tokens that follow it. Returns the matched command
+// string on match, undefined otherwise.
+const DESTRUCTIVE_RULES: Array<{ subcommand: string; match: (tokens: string[], subcommand: string) => string | undefined }> = [
+	{ subcommand: "revert", match: (_t, sub) => `git ${sub}` },
 	{
 		subcommand: "reset",
-		match: (tokens) => tokens.some((t) => t === "--hard" || t === "-H"),
-		label: "git reset --hard",
+		match: (t, sub) => t.some((x) => x === "--hard" || x === "-H") ? `git ${sub} ${t.join(" ")}` : undefined,
 	},
 	{
 		subcommand: "push",
-		match: (tokens) =>
-			tokens.some((t) => t === "--force" || t === "-f" || t === "--force-with-lease" || t.includes("--delete")),
-		label: "git push --force/--delete",
+		match: (t, sub) =>
+			t.some((x) => x === "--force" || x === "-f" || x === "--force-with-lease" || x.includes("--delete"))
+				? `git ${sub} ${t.join(" ")}`
+				: undefined,
 	},
 	{
 		subcommand: "clean",
-		match: (tokens) => tokens.some((t) => t.includes("-") && (t.includes("f") || t.includes("d") || t.includes("x"))),
-		label: "git clean -fd/-fdx",
+		match: (t, sub) =>
+			t.some((x) => x.includes("-") && (x.includes("f") || x.includes("d") || x.includes("x")))
+				? `git ${sub} ${t.join(" ")}`
+				: undefined,
 	},
 	{
 		subcommand: "checkout",
-		match: (tokens) => tokens.includes("--") || tokens.includes(".") || tokens.includes("*"),
-		label: "git checkout -- .",
+		match: (t, sub) => {
+			const dd = t.indexOf("--");
+			if (dd !== -1) {
+				const after = t.slice(dd + 1);
+				if (after.length === 0 || after.includes(".") || after.includes("*"))
+					return `git ${sub} ${t.join(" ")}`;
+			}
+			// bare `checkout .` or `checkout *` (no --)
+			if (t.includes(".") || t.includes("*"))
+				return `git ${sub} ${t.join(" ")}`;
+			return undefined;
+		},
 	},
 	{
 		subcommand: "restore",
-		match: (tokens) => tokens.includes("--") || tokens.includes(".") || tokens.includes("*") || tokens.includes("--staged") === false && tokens.length === 0,
-		label: "git restore .",
+		match: (t, sub) => {
+			if (t.includes(".") || t.includes("*"))
+				return `git ${sub} ${t.join(" ")}`;
+			const dd = t.indexOf("--");
+			if (dd !== -1) {
+				const after = t.slice(dd + 1);
+				if (after.length === 0 || after.includes(".") || after.includes("*"))
+					return `git ${sub} ${t.join(" ")}`;
+			}
+			// bare `restore` with no args = restore all unstaged
+			if (t.length === 0) return `git ${sub}`;
+			return undefined;
+		},
 	},
 	{
 		subcommand: "branch",
-		match: (tokens) => tokens.some((t) => t === "-D" || t.includes("D") && t.startsWith("-")),
-		label: "git branch -D",
+		match: (t, sub) =>
+			t.some((x) => x === "-D" || (x.includes("D") && x.startsWith("-")))
+				? `git ${sub} ${t.join(" ")}`
+				: undefined,
 	},
 	{
 		subcommand: "rm",
-		match: (tokens) => tokens.some((t) => t === "-r" || (t.startsWith("-") && t.includes("r"))),
-		label: "git rm -r",
+		match: (t, sub) =>
+			t.some((x) => x === "-r" || (x.startsWith("-") && x.includes("r")))
+				? `git ${sub} ${t.join(" ")}`
+				: undefined,
 	},
 ];
 
@@ -93,7 +121,7 @@ const WRAPPER_PREFIXES = new Set(["sudo", "env", "time", "nohup", "exec", "comma
 const TEXT_VERBS = new Set(["echo", "printf", "cat", "less", "more", "head", "tail", "grep", "rg", "sed", "awk", "write", "say"]);
 
 interface DestructiveMatch {
-	label: string;
+	command: string;
 	subcommand: string;
 }
 
@@ -145,8 +173,9 @@ function scanSegment(segment: string): DestructiveMatch | undefined {
 	if (!subcommand) return undefined;
 	const flagTokens = after.slice(i + 1);
 	for (const rule of DESTRUCTIVE_RULES) {
-		if (subcommand === rule.subcommand && rule.match(flagTokens)) {
-			return { label: rule.label, subcommand };
+		if (subcommand === rule.subcommand) {
+			const command = rule.match(flagTokens, subcommand);
+			if (command) return { command, subcommand };
 		}
 	}
 	return undefined;
@@ -306,21 +335,21 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		if (mode === "block" || !ctx.hasUI) {
 			return {
 				block: true,
-				reason: `git-guard (${mode}): refusing "${match.label}". Use /gitunsafe to allow destructive git for this session, or /gitguard-mode prompt to be asked.`,
+				reason: `git-guard (${mode}): refusing "${match.command}". Use /gitunsafe to allow destructive git for this session, or /gitguard-mode prompt to be asked.`,
 			};
 		}
 
-		notifyAttention("pi needs input", `${match.label} blocked`);
+		notifyAttention("pi needs input", `${match.command} blocked`);
 
 		const choice = await ctx.ui.select(
-			`Destructive git command detected\n\n  ${match.label}\n\nAllow this command to run?`,
+			`Destructive git command detected\n\n  ${match.command}\n\nAllow this command to run?`,
 			["Yes (this time only)", "Yes (remember for session)", "No"],
 		);
 
 		if (!choice || choice === "No") {
 			return {
 				block: true,
-				reason: `User declined ${match.label}`,
+				reason: `User declined ${match.command}`,
 			};
 		}
 
