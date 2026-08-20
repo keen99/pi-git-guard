@@ -44,9 +44,13 @@ const BYPASS_KEY = "git-guard-bypass";
 const MODE_KEY = "git-guard-mode";
 
 // Commands we refuse/prompt on. Each entry: the git subcommand name and a
-// predicate over the tokens that follow it. Returns the matched command
-// string on match, undefined otherwise.
-const DESTRUCTIVE_RULES: Array<{ subcommand: string; match: (tokens: string[], subcommand: string) => string | undefined }> = [
+// predicate over the tokens that follow. Returns a RuleMatch on match,
+// undefined otherwise. `pathspecs` without `alwaysDestructive` means the
+// handler must dirty-check those paths first (prompt only when uncommitted
+// changes exist for them).
+type RuleMatch = string | { command: string; pathspecs?: string[]; alwaysDestructive?: boolean };
+
+const DESTRUCTIVE_RULES: Array<{ subcommand: string; match: (tokens: string[], subcommand: string) => RuleMatch | undefined }> = [
 	{ subcommand: "revert", match: (_t, sub) => `git ${sub}` },
 	{
 		subcommand: "reset",
@@ -69,32 +73,47 @@ const DESTRUCTIVE_RULES: Array<{ subcommand: string; match: (tokens: string[], s
 	{
 		subcommand: "checkout",
 		match: (t, sub) => {
+			if (t.length === 0) return undefined;
+			const cmd = `git ${sub} ${t.join(" ")}`;
 			const dd = t.indexOf("--");
+			// Force flag on checkout always discards local modifications.
+			if (t.some((x) => x === "-f" || x === "--force"))
+				return { command: cmd, pathspecs: pathspecsFrom(t, dd), alwaysDestructive: true };
 			if (dd !== -1) {
 				const after = t.slice(dd + 1);
 				if (after.length === 0 || after.includes(".") || after.includes("*"))
-					return `git ${sub} ${t.join(" ")}`;
+					return { command: cmd, pathspecs: after, alwaysDestructive: true };
+			} else if (t.includes(".") || t.includes("*")) {
+				return {
+					command: cmd,
+					pathspecs: t.filter((x) => x === "." || x === "*"),
+					alwaysDestructive: true,
+				};
 			}
-			// bare `checkout .` or `checkout *` (no --)
-			if (t.includes(".") || t.includes("*"))
-				return `git ${sub} ${t.join(" ")}`;
-			return undefined;
+			// File checkout discards uncommitted changes to that file. Dirty-check
+			// the pathspecs: branch names match nothing in status -> clean -> allow.
+			return { command: cmd, pathspecs: pathspecsFrom(t, dd) };
 		},
 	},
 	{
 		subcommand: "restore",
 		match: (t, sub) => {
-			if (t.includes(".") || t.includes("*"))
-				return `git ${sub} ${t.join(" ")}`;
+			const cmd = `git ${sub}${t.length ? ` ${t.join(" ")}` : ""}`;
+			// bare `restore` with no args = restore all unstaged
+			if (t.length === 0) return { command: cmd, pathspecs: [], alwaysDestructive: true };
 			const dd = t.indexOf("--");
 			if (dd !== -1) {
 				const after = t.slice(dd + 1);
 				if (after.length === 0 || after.includes(".") || after.includes("*"))
-					return `git ${sub} ${t.join(" ")}`;
+					return { command: cmd, pathspecs: after, alwaysDestructive: true };
+			} else if (t.includes(".") || t.includes("*")) {
+				return {
+					command: cmd,
+					pathspecs: t.filter((x) => x === "." || x === "*"),
+					alwaysDestructive: true,
+				};
 			}
-			// bare `restore` with no args = restore all unstaged
-			if (t.length === 0) return `git ${sub}`;
-			return undefined;
+			return { command: cmd, pathspecs: pathspecsFrom(t, dd) };
 		},
 	},
 	{
@@ -123,6 +142,16 @@ const TEXT_VERBS = new Set(["echo", "printf", "cat", "less", "more", "head", "ta
 interface DestructiveMatch {
 	command: string;
 	subcommand: string;
+	/** Pathspecs (from checkout/restore) that the rule wants dirty-checked. */
+	pathspecs?: string[];
+	/** True when the rule already decided this is destructive (no dirty-check needed). */
+	alwaysDestructive?: boolean;
+}
+
+/** Extract flag tokens from checkout/restore tokens for pathspec collection. */
+function pathspecsFrom(tokens: string[], ddIndex: number): string[] {
+	if (ddIndex !== -1) return tokens.slice(ddIndex + 1);
+	return tokens.filter((x) => !x.startsWith("-"));
 }
 
 /**
@@ -142,8 +171,9 @@ function findDestructiveGit(command: string): DestructiveMatch | undefined {
 
 function scanSegment(segment: string): DestructiveMatch | undefined {
 	if (!segment) return undefined;
-	// Drop leading env-var assignments (FOO=bar git ...) and redirections.
-	let tokens = tokenize(segment);
+	// Drop leading env-var assignments (FOO=bar git ...) and redirections
+	// (2>/dev/null etc) so they are not mistaken for flags or pathspecs.
+	let tokens = tokenize(segment).filter((x) => !isRedirectToken(x));
 	while (tokens.length && isEnvAssignment(tokens[0])) tokens = tokens.slice(1);
 	// Strip wrapper prefixes (sudo git ..., env git ...).
 	while (tokens.length && WRAPPER_PREFIXES.has(tokens[0])) {
@@ -174,8 +204,15 @@ function scanSegment(segment: string): DestructiveMatch | undefined {
 	const flagTokens = after.slice(i + 1);
 	for (const rule of DESTRUCTIVE_RULES) {
 		if (subcommand === rule.subcommand) {
-			const command = rule.match(flagTokens, subcommand);
-			if (command) return { command, subcommand };
+			const m = rule.match(flagTokens, subcommand);
+			if (m === undefined) continue;
+			if (typeof m === "string") return { command: m, subcommand };
+			return {
+				command: m.command,
+				subcommand,
+				pathspecs: m.pathspecs,
+				alwaysDestructive: m.alwaysDestructive,
+			};
 		}
 	}
 	return undefined;
@@ -215,6 +252,34 @@ function tokenize(segment: string): string[] {
 
 function isEnvAssignment(token: string): boolean {
 	return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+}
+
+/** True for shell redirection tokens like `2>/dev/null`, `>out`, `>>out`, `<in`, `2>&1`. */
+function isRedirectToken(token: string): boolean {
+	return /^(?:\d*)>>?/.test(token) || token.startsWith("<");
+}
+
+/**
+ * Check whether any of the given pathspecs have uncommitted changes.
+ * Returns true (dirty), false (clean), or undefined when the check itself
+ * failed (caller must fail safe and prompt).
+ */
+async function hasUncommittedChanges(
+	pi: ExtensionAPI,
+	cwd: string,
+	pathspecs: string[],
+	signal?: AbortSignal,
+): Promise<boolean | undefined> {
+	try {
+		const result = await pi.exec("git", ["-C", cwd, "status", "--porcelain", "--", ...pathspecs], {
+			signal,
+			timeout: 5000,
+		});
+		if (result.code !== 0) return undefined;
+		return result.stdout.trim().length > 0;
+	} catch {
+		return undefined;
+	}
 }
 
 function notifyAttention(title: string, body: string): void {
@@ -325,6 +390,14 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 
 		const match = findDestructiveGit(command);
 		if (!match) return undefined;
+
+		// Single-file checkout/restore: only destructive when those pathspecs
+		// actually carry uncommitted changes. Branch switches stay silent.
+		if (!match.alwaysDestructive && match.pathspecs) {
+			const dirty = await hasUncommittedChanges(pi, ctx.cwd, match.pathspecs, ctx.signal);
+			if (dirty === false) return undefined;
+			// dirty === true -> prompt below; undefined (check failed) -> fail safe, prompt.
+		}
 
 		if (bypass) return undefined;
 
