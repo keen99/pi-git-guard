@@ -146,6 +146,8 @@ interface DestructiveMatch {
 	pathspecs?: string[];
 	/** True when the rule already decided this is destructive (no dirty-check needed). */
 	alwaysDestructive?: boolean;
+	/** The full original command string (whole && chain), for display and logging. */
+	fullCommand?: string;
 }
 
 /** Extract flag tokens from checkout/restore tokens for pathspec collection. */
@@ -155,18 +157,23 @@ function pathspecsFrom(tokens: string[], ddIndex: number): string[] {
 }
 
 /**
- * Scan a full bash command string for a destructive git invocation.
- * Splits on && ; | and inspects each segment. Returns the first match.
+ * Scan a full bash command string for destructive git invocations.
+ * Splits on && ; | and inspects each segment. Returns ALL matches so the
+ * prompt can show every destructive command in the chain.
  */
-function findDestructiveGit(command: string): DestructiveMatch | undefined {
-	// Split into segments on chain operators. Keep it simple — we are scanning
-	// text, not building an AST.
-	const segments = command.split(/(?:&&|\|\||;|\||&&)/);
+function findAllDestructiveGit(command: string): DestructiveMatch[] {
+	const segments = command.split(/(?:&&|\|\||;|\|)/);
+	const matches: DestructiveMatch[] = [];
 	for (const raw of segments) {
 		const match = scanSegment(raw.trim());
-		if (match) return match;
+		if (match) matches.push({ ...match, fullCommand: command });
 	}
-	return undefined;
+	return matches;
+}
+
+/** Back-compat: first match only. */
+function findDestructiveGit(command: string): DestructiveMatch | undefined {
+	return findAllDestructiveGit(command)[0];
 }
 
 function scanSegment(segment: string): DestructiveMatch | undefined {
@@ -297,6 +304,30 @@ function notifyAttention(title: string, body: string): void {
 	}
 }
 
+/** Append a git-guard decision to the session log so approvals/declines
+ *  are visible in the transcript after the fact. Best-effort, never throws. */
+function logDecision(
+	pi: ExtensionAPI,
+	decision: "allowed" | "declined" | "blocked" | "bypassed",
+	command: string,
+	matched: string[],
+): void {
+	try {
+		pi.appendEntry({
+			type: "custom",
+			customType: "git-guard-decision",
+			data: {
+				decision,
+				matched,
+				command,
+				at: new Date().toISOString(),
+			},
+		});
+	} catch {
+		/* ignore persistence errors */
+	}
+}
+
 export default function gitGuardExtension(pi: ExtensionAPI): void {
 	let bypass = false;
 	let disabled = false;
@@ -388,43 +419,60 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		const command = (event.input as { command?: string }).command;
 		if (!command || typeof command !== "string") return undefined;
 
-		const match = findDestructiveGit(command);
-		if (!match) return undefined;
+		const matches = findAllDestructiveGit(command);
+		if (matches.length === 0) return undefined;
 
 		// Single-file checkout/restore: only destructive when those pathspecs
 		// actually carry uncommitted changes. Branch switches stay silent.
-		if (!match.alwaysDestructive && match.pathspecs) {
-			const dirty = await hasUncommittedChanges(pi, ctx.cwd, match.pathspecs, ctx.signal);
-			if (dirty === false) return undefined;
-			// dirty === true -> prompt below; undefined (check failed) -> fail safe, prompt.
+		const gated: DestructiveMatch[] = [];
+		for (const match of matches) {
+			if (!match.alwaysDestructive && match.pathspecs) {
+				const dirty = await hasUncommittedChanges(pi, ctx.cwd, match.pathspecs, ctx.signal);
+				if (dirty === false) continue;
+				// dirty === true -> gate below; undefined (check failed) -> fail safe, gate.
+			}
+			gated.push(match);
 		}
+		if (gated.length === 0) return undefined;
 
-		if (bypass) return undefined;
+		const matchedList = gated.map((m) => m.command).join("\n  ");
+		// Show every destructive segment + the full chain so approval decisions
+		// are made on complete information, not one fragment.
+		const display = `${matchedList}\n\nFull command:\n  ${command}`;
+
+		if (bypass) {
+			logDecision(pi, "bypassed", command, gated.map((m) => m.command));
+			return undefined;
+		}
 
 		// Lazy restore in case session_start hasn't run for this ctx yet.
 		if (!bypass) restoreFromSession(ctx);
 		if (bypass) return undefined;
 
 		if (mode === "block" || !ctx.hasUI) {
+			logDecision(pi, "blocked", command, gated.map((m) => m.command));
 			return {
 				block: true,
-				reason: `git-guard (${mode}): refusing "${match.command}". Use /gitunsafe to allow destructive git for this session, or /gitguard-mode prompt to be asked.`,
+				reason: `git-guard (${mode}): refusing:\n${display}\nUse /gitunsafe to allow destructive git for this session, or /gitguard-mode prompt to be asked.`,
 			};
 		}
 
-		notifyAttention("pi needs input", `${match.command} blocked`);
+		notifyAttention("pi needs input", `git-guard: ${gated[0].command}`);
 
 		const choice = await ctx.ui.select(
-			`Destructive git command detected\n\n  ${match.command}\n\nAllow this command to run?`,
+			`Destructive git command${gated.length > 1 ? "s" : ""} detected\n\n  ${display}\n\nAllow this command to run?`,
 			["Yes (this time only)", "Yes (remember for session)", "No"],
 		);
 
 		if (!choice || choice === "No") {
+			logDecision(pi, "declined", command, gated.map((m) => m.command));
 			return {
 				block: true,
-				reason: `User declined ${match.command}`,
+				reason: `User declined:\n${display}`,
 			};
 		}
+
+		logDecision(pi, "allowed", command, gated.map((m) => m.command));
 
 		if (choice === "Yes (remember for session)") {
 			persistBypass(true);
