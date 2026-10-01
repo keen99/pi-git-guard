@@ -289,9 +289,10 @@ async function hasUncommittedChanges(
 	}
 }
 
+import { execFileSync } from "node:child_process";
+
 function notifyAttention(title: string, body: string): void {
 	try {
-		const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
 		if (process.platform === "darwin") {
 			execFileSync(
 				"osascript",
@@ -377,7 +378,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("gitunsafe", {
-		description: "Disable the git-guard gate for the rest of the session.",
+		description: "git-guard: allow destructive git (this session)",
 		handler: (_args, ctx) => {
 			persistBypass(true);
 			ctx.ui.notify("git-guard: gate disabled for this session (/gitsafe to re-enable)", "info");
@@ -385,7 +386,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("gitsafe", {
-		description: "Re-enable the git-guard gate.",
+		description: "git-guard: re-enable destructive-git gate",
 		handler: (_args, ctx) => {
 			persistBypass(false);
 			ctx.ui.notify(`git-guard: gate re-enabled (mode: ${mode})`, "info");
@@ -393,7 +394,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("gitguard-mode", {
-		description: "Show or set the git-guard mode (prompt | block).",
+		description: "git-guard: show/set mode (prompt|block)",
 		handler: (args, ctx) => {
 			const trimmed = args.trim();
 			if (trimmed === "prompt" || trimmed === "block") {
@@ -406,7 +407,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("nogitguard", {
-		description: "Disable the entire git-guard extension until restart.",
+		description: "git-guard: disable entire extension until restart",
 		handler: (_args, ctx) => {
 			disabled = true;
 			ctx.ui.notify("git-guard: disabled until restart", "warning");
@@ -460,7 +461,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		notifyAttention("pi needs input", `git-guard: ${gated[0].command}`);
 
 		const choice = await ctx.ui.select(
-			`Destructive git command${gated.length > 1 ? "s" : ""} detected\n\n  ${display}\n\nAllow this command to run?`,
+			`git-guard: destructive git command${gated.length > 1 ? "s" : ""}\n\n  ${display}\n\nAllow? (/gitunsafe = allow all destructive git this session)`,
 			["Yes (this time only)", "Yes (remember for session)", "No"],
 		);
 
