@@ -20,6 +20,7 @@ A [pi](https://pi.dev) extension that stops the agent from running destructive g
 | `git checkout -- .` / `git checkout .` / `git restore .` | prompt (or block)     |
 | `git branch -D ...`                                  | prompt (or block)         |
 | `git rm -r ...`                                      | prompt (or block)         |
+| `git show HEAD:path > path` / any git command whose output redirects onto its own path arg | prompt when target is dirty (working-tree overwrite) |
 | Everything else (`commit`, `add`, `merge`, `rebase`, `pull`, `fetch`, `stash`, ...) | allow |
 
 ## Modes

@@ -25,6 +25,13 @@
  * (sudo, env, time, xargs), && / ; chains, and $(...) is intentionally NOT
  * followed — commands are scanned as text, false positives preferred over
  * a silently rewritten branch.
+ *
+ * It also catches redirect-overwrites: a read-only git command whose stdout
+ * is redirected onto one of its own path arguments (the classic
+ * `git show HEAD:api.py > api.py` "restore" that silently discards
+ * uncommitted changes). The redirect target is dirty-checked the same way
+ * as single-file checkout/restore — a clean tree makes it a no-op and it
+ * stays allowed.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -180,7 +187,8 @@ function scanSegment(segment: string): DestructiveMatch | undefined {
 	if (!segment) return undefined;
 	// Drop leading env-var assignments (FOO=bar git ...) and redirections
 	// (2>/dev/null etc) so they are not mistaken for flags or pathspecs.
-	let tokens = tokenize(segment).filter((x) => !isRedirectToken(x));
+	const rawTokens = tokenize(segment);
+	let tokens = stripRedirections(rawTokens);
 	while (tokens.length && isEnvAssignment(tokens[0])) tokens = tokens.slice(1);
 	// Strip wrapper prefixes (sudo git ..., env git ...).
 	while (tokens.length && WRAPPER_PREFIXES.has(tokens[0])) {
@@ -222,10 +230,46 @@ function scanSegment(segment: string): DestructiveMatch | undefined {
 			};
 		}
 	}
+
+	// No destructive subcommand — but a redirect onto one of the command's
+	// own path arguments is a working-tree overwrite (e.g.
+	// `git show HEAD:api.py > api.py`). Dirty-check the target like
+	// single-file checkout/restore; clean tree = content-identical no-op.
+	const targets = redirectTargets(rawTokens);
+	if (targets.length > 0) {
+		const args = after.slice(i);
+		const hits = targets.filter((t) => args.some((a) => samePathish(a, t)));
+		if (hits.length > 0) {
+			return { command: segment, subcommand, pathspecs: hits, alwaysDestructive: false };
+		}
+	}
 	return undefined;
 }
 
 /** Minimal shell-ish tokenizer. Handles quotes enough to not break on spaces inside them. */
+/** Remove output/input redirection operators AND their target files from a
+ *  token stream (`cmd > out.txt` must not leave `out.txt` behind as a fake
+ *  git argument). Handles `>f`, `> f`, `>>f`, `2>f`, `&>f`, `2>&1`, `<f`, `< f`. */
+function stripRedirections(tokens: string[]): string[] {
+	const out: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const tok = tokens[i];
+		if (tok.startsWith("<")) {
+			// stdin redirect: no separate target token unless bare `<`
+			if (tok === "<" && i + 1 < tokens.length) i++;
+			continue;
+		}
+		const m = REDIRECT_RE.exec(tok);
+		if (m) {
+			const rest = tok.slice(m[0].length);
+			if (!rest && i + 1 < tokens.length) i++; // consume separate target token
+			continue;
+		}
+		out.push(tok);
+	}
+	return out;
+}
+
 function tokenize(segment: string): string[] {
 	const tokens: string[] = [];
 	let current = "";
@@ -261,9 +305,41 @@ function isEnvAssignment(token: string): boolean {
 	return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
 }
 
-/** True for shell redirection tokens like `2>/dev/null`, `>out`, `>>out`, `<in`, `2>&1`. */
-function isRedirectToken(token: string): boolean {
-	return /^(?:\d*)>>?/.test(token) || token.startsWith("<");
+/** Matches a leading output-redirect operator: > >> 2> 2>> 2&> &> &>>. */
+const REDIRECT_RE = /^(?:\d*>>?|\d*&>|&>>?)/;
+
+/** Extract the target paths of output redirects (>, >>, &>, 2>) from raw
+ *  tokens. Stdin redirects (<) are not writes and are ignored, as are fd
+ *  duplications like 2>&1. Handles both `>f` and `> f` forms. */
+function redirectTargets(tokens: string[]): string[] {
+	const targets: string[] = [];
+	for (let i = 0; i < tokens.length; i++) {
+		const m = REDIRECT_RE.exec(tokens[i]);
+		if (!m) continue;
+		const rest = tokens[i].slice(m[0].length);
+		if (rest) {
+			if (!rest.startsWith("&")) targets.push(rest);
+		} else if (i + 1 < tokens.length) {
+			targets.push(tokens[i + 1]);
+		}
+	}
+	return targets;
+}
+
+/** Loose path comparison for redirect-overwrite detection: does redirect
+ *  target t refer to the same file as git argument a? Matches exact and
+ *  ./-prefixed paths, `rev:path` args against their working-tree path, and
+ *  falls back to basename equality (fail safe: prompts on unlikely
+ *  cross-directory collisions rather than missing a real overwrite). */
+function samePathish(a: string, t: string): boolean {
+	const norm = (p: string) => p.replace(/^\.\//, "").replace(/\/+$/, "");
+	const x = norm(a);
+	const y = norm(t);
+	if (x === y) return true;
+	if (x.endsWith(":" + y) || y.endsWith(":" + x)) return true;
+	const bx = x.slice(Math.max(x.lastIndexOf("/"), x.lastIndexOf(":")) + 1);
+	const by = y.slice(y.lastIndexOf("/") + 1);
+	return bx !== "" && bx === by;
 }
 
 /**
@@ -454,7 +530,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 			logDecision(pi, "blocked", command, gated.map((m) => m.command));
 			return {
 				block: true,
-				reason: `git-guard (${mode}): refusing:\n${display}\nUse /gitunsafe to allow destructive git for this session, or /gitguard-mode prompt to be asked.`,
+				reason: `git-guard (${mode}): refusing:\n${display}\nUse /gitunsafe to allow destructive git for this session, or /gitguard-mode prompt to be asked.\nDo NOT attempt this action or the same effect through any other mechanism (redirection, tee, cp/dd, other commands, other tools). Stop and tell the user what you were trying to do instead.`,
 			};
 		}
 
@@ -469,7 +545,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 			logDecision(pi, "declined", command, gated.map((m) => m.command));
 			return {
 				block: true,
-				reason: `User declined:\n${display}`,
+				reason: `User declined:\n${display}\nDo NOT retry this command, and do NOT attempt the same action through any other mechanism (output redirection like > or >>, tee, cp/dd, python, write/edit tools, etc.). The user said no. If you believe the action is necessary, stop and explain why, then wait for the user to decide.`,
 			};
 		}
 
