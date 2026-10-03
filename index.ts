@@ -410,22 +410,52 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	let disabled = false;
 	let mode: GuardMode = "prompt";
 
-	function persistBypass(value: boolean) {
+	// ── Footer status ──
+	type StatusCtx = {
+		ui: { setStatus(key: string, text: string | undefined): void; theme?: { fg(color: string, text: string): string } };
+	};
+
+	function statusText(): string {
+		if (disabled) return "🛡 git:off";
+		if (bypass) return "🛡 git:BYPASS";
+		return `🛡 git:${mode}`;
+	}
+
+	function statusColor(): string {
+		if (disabled) return "dim";
+		if (bypass) return "warning";
+		if (mode === "block") return "error";
+		return "dim";
+	}
+
+	function updateStatus(ctx: StatusCtx) {
+		try {
+			const theme = ctx.ui.theme;
+			const text = statusText();
+			ctx.ui.setStatus("zg-git-guard", theme?.fg ? theme.fg(statusColor(), text) : text);
+		} catch {
+			/* footer status is best-effort */
+		}
+	}
+
+	function persistBypass(ctx: StatusCtx, value: boolean) {
 		bypass = value;
 		try {
 			pi.appendEntry({ type: "custom", customType: BYPASS_KEY, data: { bypassed: value } satisfies BypassState });
 		} catch {
 			/* ignore persistence errors */
 		}
+		updateStatus(ctx);
 	}
 
-	function persistMode(value: GuardMode) {
+	function persistMode(ctx: StatusCtx, value: GuardMode) {
 		mode = value;
 		try {
 			pi.appendEntry({ type: "custom", customType: MODE_KEY, data: { mode: value } satisfies ModeState });
 		} catch {
 			/* ignore persistence errors */
 		}
+		updateStatus(ctx);
 	}
 
 	function restoreFromSession(ctx: { sessionManager: { getEntries(): Array<{ type: string; customType?: string; data?: unknown }> } }) {
@@ -451,12 +481,13 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		mode = "prompt";
 		disabled = false;
 		restoreFromSession(ctx);
+		updateStatus(ctx);
 	});
 
 	pi.registerCommand("gitunsafe", {
 		description: "git-guard: allow destructive git (this session)",
 		handler: (_args, ctx) => {
-			persistBypass(true);
+			persistBypass(ctx, true);
 			ctx.ui.notify("git-guard: gate disabled for this session (/gitsafe to re-enable)", "info");
 		},
 	});
@@ -464,7 +495,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("gitsafe", {
 		description: "git-guard: re-enable destructive-git gate",
 		handler: (_args, ctx) => {
-			persistBypass(false);
+			persistBypass(ctx, false);
 			ctx.ui.notify(`git-guard: gate re-enabled (mode: ${mode})`, "info");
 		},
 	});
@@ -474,7 +505,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		handler: (args, ctx) => {
 			const trimmed = args.trim();
 			if (trimmed === "prompt" || trimmed === "block") {
-				persistMode(trimmed);
+				persistMode(ctx, trimmed);
 				ctx.ui.notify(`git-guard: mode set to ${trimmed}`, "info");
 				return;
 			}
@@ -486,6 +517,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		description: "git-guard: disable entire extension until restart",
 		handler: (_args, ctx) => {
 			disabled = true;
+			updateStatus(ctx);
 			ctx.ui.notify("git-guard: disabled until restart", "warning");
 		},
 	});
@@ -552,7 +584,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		logDecision(pi, "allowed", command, gated.map((m) => m.command));
 
 		if (choice === "Yes (remember for session)") {
-			persistBypass(true);
+			persistBypass(ctx, true);
 		}
 
 		return undefined;
