@@ -35,7 +35,10 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 type GuardMode = "prompt" | "block";
 
@@ -390,15 +393,11 @@ function logDecision(
 	matched: string[],
 ): void {
 	try {
-		pi.appendEntry({
-			type: "custom",
-			customType: "git-guard-decision",
-			data: {
-				decision,
-				matched,
-				command,
-				at: new Date().toISOString(),
-			},
+		pi.appendEntry("git-guard-decision", {
+			decision,
+			matched,
+			command,
+			at: new Date().toISOString(),
 		});
 	} catch {
 		/* ignore persistence errors */
@@ -441,7 +440,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	function persistBypass(ctx: StatusCtx, value: boolean) {
 		bypass = value;
 		try {
-			pi.appendEntry({ type: "custom", customType: BYPASS_KEY, data: { bypassed: value } satisfies BypassState });
+			pi.appendEntry(BYPASS_KEY, { bypassed: value } satisfies BypassState);
 		} catch {
 			/* ignore persistence errors */
 		}
@@ -451,7 +450,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 	function persistMode(ctx: StatusCtx, value: GuardMode) {
 		mode = value;
 		try {
-			pi.appendEntry({ type: "custom", customType: MODE_KEY, data: { mode: value } satisfies ModeState });
+			pi.appendEntry(MODE_KEY, { mode: value } satisfies ModeState);
 		} catch {
 			/* ignore persistence errors */
 		}
@@ -482,11 +481,21 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 		disabled = false;
 		restoreFromSession(ctx);
 		updateStatus(ctx);
+		// Deep-smoke marker (release matrix): proves session_start ran and the
+		// setStatus path works on the real session's ui object.
+		if (process.env.GIT_GUARD_DEBUG === "1") {
+			try {
+				writeFileSync(
+					join(getAgentDir(), "git-guard-installed.json"),
+					JSON.stringify({ installed: true }, null, 2) + "\n",
+				);
+			} catch {}
+		}
 	});
 
 	pi.registerCommand("gitunsafe", {
 		description: "git-guard: allow destructive git (this session)",
-		handler: (_args, ctx) => {
+		handler: async (_args, ctx) => {
 			persistBypass(ctx, true);
 			ctx.ui.notify("git-guard: gate disabled for this session (/gitsafe to re-enable)", "info");
 		},
@@ -494,7 +503,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("gitsafe", {
 		description: "git-guard: re-enable destructive-git gate",
-		handler: (_args, ctx) => {
+		handler: async (_args, ctx) => {
 			persistBypass(ctx, false);
 			ctx.ui.notify(`git-guard: gate re-enabled (mode: ${mode})`, "info");
 		},
@@ -502,7 +511,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("gitguard-mode", {
 		description: "git-guard: show/set mode (prompt|block)",
-		handler: (args, ctx) => {
+		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 			if (trimmed === "prompt" || trimmed === "block") {
 				persistMode(ctx, trimmed);
@@ -515,7 +524,7 @@ export default function gitGuardExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("nogitguard", {
 		description: "git-guard: disable entire extension until restart",
-		handler: (_args, ctx) => {
+		handler: async (_args, ctx) => {
 			disabled = true;
 			updateStatus(ctx);
 			ctx.ui.notify("git-guard: disabled until restart", "warning");
