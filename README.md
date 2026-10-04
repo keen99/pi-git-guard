@@ -1,5 +1,8 @@
 # pi-git-guard
 
+![release-watch](https://github.com/keen99/pi-git-guard/actions/workflows/release-watch.yml/badge.svg)
+[![pi tested](https://img.shields.io/github/v/release/keen99/pi-git-guard?label=pi%20tested%200.75.0%20%E2%86%92)](https://github.com/keen99/pi-git-guard/releases)
+
 A [pi](https://pi.dev) extension that stops the agent from running destructive git commands via the `bash` tool without asking. `git revert` is the poster child — LLMs reach for it to "undo" things and quietly rewrite shared history — but the default blocklist covers the whole risk class.
 
 ## Why
@@ -52,6 +55,10 @@ It does not parse shell quoting beyond what's needed to find the git subcommand 
 ### As a pi package
 
 ```bash
+# authenticated (ssh — private repos)
+pi install git:git@github.com:keen99/pi-git-guard
+
+# public (https)
 pi install git:github.com/keen99/pi-git-guard
 ```
 
@@ -67,6 +74,22 @@ Drop `index.ts` into `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (pr
 ## State
 
 Approval, mode, and bypass are stored as custom session entries, so they survive `/reload`. They reset on `/new` and `/fork` because those start fresh sessions.
+
+## Development
+
+```sh
+npm run check       # typecheck + unit tests (fake pi, real git in temp repos)
+npm run test:matrix # deep smoke on every published pi release >= 0.75.0
+```
+
+The matrix boots each pinned pi release in RPC mode with the extension
+loaded and asserts session_start + command registration on the real
+process. tool_call gating logic is exercised by the unit tests with the
+real handler. Cached installs live in `.matrix-cache/` and are reused
+across runs; new pi releases are picked up automatically.
+
+`PI_TEST_BIN` overrides the pi binary in the smoke test. Tests use
+synthetic sessions in temp dirs; never touches real sessions.
 
 ## License
 
