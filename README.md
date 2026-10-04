@@ -55,7 +55,7 @@ It does not parse shell quoting beyond what's needed to find the git subcommand 
 ### As a pi package
 
 ```bash
-# authenticated (ssh — private repos)
+# ssh
 pi install git:git@github.com:keen99/pi-git-guard
 
 # public (https)
