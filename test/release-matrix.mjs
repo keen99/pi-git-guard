@@ -59,6 +59,7 @@ function resolveVersions() {
 }
 
 let failed = 0;
+const results = [];
 const versions = await resolveVersions();
 for (const version of versions) {
   const prefix = join(cacheRoot, version);
@@ -70,6 +71,7 @@ for (const version of versions) {
       console.log(`[matrix] ${version}: INSTALL FAILED`);
       console.error(install.stderr?.slice(0, 500));
       failed++;
+      results.push({ version, ok: false });
       continue;
     }
   }
@@ -82,31 +84,26 @@ for (const version of versions) {
   const output = `${smoke.stdout ?? ''}${smoke.stderr ?? ''}`.trim();
   if (smoke.status === 0) {
     console.log(`[matrix] ${version}: PASS`);
+    results.push({ version, ok: true });
   } else {
     failed++;
+    results.push({ version, ok: false });
     console.log(`[matrix] ${version}: FAIL (exit ${smoke.status})`);
     console.error(output.slice(0, 2000));
   }
 }
+
+// Per-version truth, written even when versions fail — the tag-sync step
+// uses this to create/delete release tags so the badge never claims a
+// version the current code fails on.
+mkdirSync(cacheRoot, { recursive: true });
+writeFileSync(join(cacheRoot, 'matrix-results.json'), `${JSON.stringify(results, null, 2)}\n`);
 
 if (failed > 0) {
   console.error(`[matrix] ${failed}/${versions.length} version(s) failed`);
   process.exit(1);
 }
 
-// Badge + skip-marker reflect the actual tested range, not just the newest
-// release. Written only after a fully green run.
-const oldest = versions[0];
 const newest = versions[versions.length - 1];
-mkdirSync(cacheRoot, { recursive: true });
-writeFileSync(
-  join(root, 'latest-tested.json'),
-  `${JSON.stringify({
-    schemaVersion: 1,
-    label: 'pi tested',
-    message: `${oldest} → ${newest}`,
-    color: 'brightgreen',
-  })}\n`,
-);
 writeFileSync(join(cacheRoot, '.latest-tested'), `${newest}\n`);
-console.log(`[matrix] all ${versions.length} version(s) pass (${oldest} → ${newest})`);
+console.log(`[matrix] all ${versions.length} version(s) pass (0.75.0 → ${newest})`);
