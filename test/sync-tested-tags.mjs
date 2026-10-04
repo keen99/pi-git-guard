@@ -9,7 +9,7 @@
 // code fails on. All gh failures are loud — no swallowing.
 //
 // Usage: node test/sync-tested-tags.mjs [--dry-run]
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -18,7 +18,14 @@ const dry = process.argv.includes('--dry-run');
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const resultsPath = join(root, '.matrix-cache', 'matrix-results.json');
 if (!existsSync(resultsPath)) {
-	console.error('no matrix-results.json — run the matrix first');
+	console.error(`no matrix-results.json at ${resultsPath}`);
+	console.error(`cwd=${process.cwd()}`);
+	try {
+		console.error('workspace .matrix-cache listing:');
+		for (const f of readdirSync(join(root, '.matrix-cache'))) console.error('  ' + f);
+	} catch (e) {
+		console.error(`  .matrix-cache unreadable: ${e.message}`);
+	}
 	process.exit(1);
 }
 const results = JSON.parse(readFileSync(resultsPath, 'utf8'));
